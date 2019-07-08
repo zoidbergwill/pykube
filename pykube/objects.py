@@ -131,17 +131,23 @@ class APIObject:
             "metadata.name": self.name
         }).watch()
 
+    def patch(self, patch):
+        '''
+        Patch the Kubernetes resource by calling the API.
+        '''
+        r = self.api.patch(**self.api_kwargs(
+            headers={"Content-Type": "application/merge-patch+json"},
+            data=json.dumps(patch),
+        ))
+        self.api.raise_for_status(r)
+        self.set_obj(r.json())
+
     def update(self):
         '''
         Update the Kubernetes resource by calling the API (patch)
         '''
         self.obj = obj_merge(self.obj, self._original_obj)
-        r = self.api.patch(**self.api_kwargs(
-            headers={"Content-Type": "application/merge-patch+json"},
-            data=json.dumps(self.obj),
-        ))
-        self.api.raise_for_status(r)
-        self.set_obj(r.json())
+        self.patch(self.obj)
 
     def delete(self, propagation_policy: str = None):
         '''
