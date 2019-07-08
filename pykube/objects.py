@@ -516,3 +516,10 @@ class PodDisruptionBudget(APIObject):
     version = "policy/v1beta1"
     endpoint = "poddisruptionbudgets"
     kind = "PodDisruptionBudget"
+
+
+class CustomResourceDefinition(APIObject):
+
+    version = "apiextensions.k8s.io/v1beta1"
+    endpoint = "customresourcedefinitions"
+    kind = "CustomResourceDefinition"
