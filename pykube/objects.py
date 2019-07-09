@@ -133,7 +133,7 @@ class APIObject:
 
     def patch(self, patch):
         '''
-        Patch the Kubernetes resource by calling the API.
+        Patch the Kubernetes resource by calling the API with a "strategic merge" patch.
         '''
         r = self.api.patch(**self.api_kwargs(
             headers={"Content-Type": "application/merge-patch+json"},
