@@ -131,7 +131,7 @@ class APIObject:
             "metadata.name": self.name
         }).watch()
 
-    def patch(self, patch):
+    def patch(self, strategic_merge_patch):
         '''
         Patch the Kubernetes resource by calling the API with a "strategic merge" patch.
         '''
