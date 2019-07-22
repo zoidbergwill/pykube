@@ -66,3 +66,12 @@ def test_filter_invalid_selector(api):
 def test_filter_selector_string(api):
     Query(api, Pod).filter(selector='application=foo').execute()
     api.get.assert_called_once_with(url='pods?labelSelector=application%3Dfoo', version='v1')
+
+
+def test_as_table(api):
+    response = MagicMock()
+    response.json.return_value = {'kind': 'Table'}
+    api.get.return_value = response
+
+    Query(api, Pod).filter(selector={'app': 'foo'}).as_table()
+    api.get.assert_called_once_with(url='pods?labelSelector=app%3Dfoo', version='v1', headers={'Accept': 'application/json;as=Table;v=v1beta1;g=meta.k8s.io'})

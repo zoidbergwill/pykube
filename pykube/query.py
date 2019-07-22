@@ -12,6 +12,24 @@ everything = object()
 now = object()
 
 
+class Table:
+    """
+    Tabular resource representation
+    See https://kubernetes.io/docs/reference/using-api/api-concepts/#receiving-resources-as-tables
+    """
+    def __init__(self, obj: dict):
+        assert obj['kind'] == 'Table'
+        self.obj = obj
+
+    @property
+    def columns(self):
+        return self.obj['columnDefinitions']
+
+    @property
+    def rows(self):
+        return self.obj['rows']
+
+
 class BaseQuery:
 
     def __init__(self, api, api_obj_class, namespace=None):
@@ -112,8 +130,8 @@ class Query(BaseQuery):
             query.resource_version = since
         return query
 
-    def execute(self):
-        kwargs = {"url": self._build_api_url()}
+    def execute(self, **kwargs):
+        kwargs["url"] = self._build_api_url()
         if self.api_obj_class.base:
             kwargs["base"] = self.api_obj_class.base
         if self.api_obj_class.version:
@@ -123,6 +141,14 @@ class Query(BaseQuery):
         r = self.api.get(**kwargs)
         r.raise_for_status()
         return r
+
+    def as_table(self) -> Table:
+        """
+        Execute query and return result as Table (similar to what kubectl does)
+        See https://kubernetes.io/docs/reference/using-api/api-concepts/#receiving-resources-as-tables
+        """
+        response = self.execute(headers={'Accept': 'application/json;as=Table;v=v1beta1;g=meta.k8s.io'})
+        return Table(response.json())
 
     def iterator(self):
         """
