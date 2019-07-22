@@ -17,9 +17,13 @@ class Table:
     Tabular resource representation
     See https://kubernetes.io/docs/reference/using-api/api-concepts/#receiving-resources-as-tables
     """
-    def __init__(self, obj: dict):
+    def __init__(self, api_obj_class, obj: dict):
         assert obj['kind'] == 'Table'
+        self.api_obj_class = api_obj_class
         self.obj = obj
+
+    def __repr__(self):
+        return "<Table of {kind} at {address}>".format(kind=self.api_obj_class.kind, address=hex(id(self)))
 
     @property
     def columns(self):
@@ -38,6 +42,9 @@ class BaseQuery:
         self.namespace = namespace
         self.selector = everything
         self.field_selector = everything
+
+    def __repr__(self):
+        return "<Query of {kind} at {address}>".format(kind=self.api_obj_class.kind, address=hex(id(self)))
 
     def all(self):
         return self._clone()
@@ -148,7 +155,7 @@ class Query(BaseQuery):
         See https://kubernetes.io/docs/reference/using-api/api-concepts/#receiving-resources-as-tables
         """
         response = self.execute(headers={'Accept': 'application/json;as=Table;v=v1beta1;g=meta.k8s.io'})
-        return Table(response.json())
+        return Table(self.api_obj_class, response.json())
 
     def iterator(self):
         """
