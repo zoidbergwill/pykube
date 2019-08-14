@@ -7,6 +7,7 @@ import json
 import posixpath
 import shlex
 import subprocess
+import os
 
 try:
     import google.auth
@@ -88,6 +89,23 @@ class KubernetesHTTPAdapter(requests.adapters.HTTPAdapter):
 
         if "token" in config.user and config.user["token"]:
             request.headers["Authorization"] = "Bearer {}".format(config.user["token"])
+
+        elif "exec" in config.user:
+            exec_conf = config.user["exec"]
+            if "command" in exec_conf:
+
+                for env_var in exec_conf['env']:
+                    os.environ[env_var['name']] = env_var['value']
+
+                output = subprocess.check_output(
+                    [exec_conf['command']] + exec_conf['args']
+                )
+
+                parsed_out = json.loads(output)
+                token = parsed_out['status']['token']
+
+            request.headers["Authorization"] = "Bearer {}".format(token)
+
         elif "auth-provider" in config.user:
             auth_provider = config.user["auth-provider"]
             if auth_provider.get("name") == "gcp":
