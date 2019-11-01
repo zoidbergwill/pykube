@@ -94,7 +94,7 @@ class KubernetesHTTPAdapter(requests.adapters.HTTPAdapter):
             exec_conf = config.user["exec"]
             if "command" in exec_conf:
 
-                for env_var in exec_conf['env']:
+                for env_var in exec_conf.get('env', []):
                     os.environ[env_var['name']] = env_var['value']
 
                 output = subprocess.check_output(
