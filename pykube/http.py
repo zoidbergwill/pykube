@@ -161,7 +161,7 @@ class HTTPClient:
     Client for interfacing with the Kubernetes API.
     """
 
-    def __init__(self, config: KubeConfig, timeout: float = DEFAULT_HTTP_TIMEOUT, dry_run: bool = False):
+    def __init__(self, config: KubeConfig, timeout: float = DEFAULT_HTTP_TIMEOUT, dry_run: bool = False, verify=True):
         """
         Creates a new instance of the HTTPClient.
 
@@ -178,6 +178,7 @@ class HTTPClient:
         session.mount("https://", KubernetesHTTPAdapter(self.config))
         session.mount("http://", KubernetesHTTPAdapter(self.config))
         self.session = session
+        self.session.verify = False
 
     @property
     def url(self):
