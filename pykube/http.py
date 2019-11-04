@@ -178,7 +178,7 @@ class HTTPClient:
         session.mount("https://", KubernetesHTTPAdapter(self.config))
         session.mount("http://", KubernetesHTTPAdapter(self.config))
         self.session = session
-        self.session.verify = False
+        self.session.verify = verify
 
     @property
     def url(self):
