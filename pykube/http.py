@@ -1,16 +1,17 @@
 """
 HTTP request related code.
 """
-
 import datetime
 import json
-import posixpath
+import os
 import shlex
 import subprocess
+from typing import Optional
 
 try:
     import google.auth
     from google.auth.transport.requests import Request as GoogleAuthRequest
+
     google_auth_installed = True
 except ImportError:
     google_auth_installed = False
@@ -21,7 +22,7 @@ from http import HTTPStatus
 from urllib.parse import urlparse
 
 from .exceptions import HTTPError
-from .utils import jsonpath_installed, jsonpath_parse
+from .utils import jsonpath_installed, jsonpath_parse, join_url_path
 from .config import KubeConfig
 
 from . import __version__
@@ -53,7 +54,10 @@ class KubernetesHTTPAdapter(requests.adapters.HTTPAdapter):
         original_request = request.copy()
 
         credentials = google.auth.default(
-            scopes=['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email']
+            scopes=[
+                "https://www.googleapis.com/auth/cloud-platform",
+                "https://www.googleapis.com/auth/userinfo.email",
+            ]
         )[0]
         credentials.token = token
         credentials.expiry = expiry
@@ -61,7 +65,9 @@ class KubernetesHTTPAdapter(requests.adapters.HTTPAdapter):
         should_persist = not credentials.valid
 
         auth_request = GoogleAuthRequest()
-        credentials.before_request(auth_request, request.method, request.url, request.headers)
+        credentials.before_request(
+            auth_request, request.method, request.url, request.headers
+        )
 
         if should_persist and config:
             self._persist_credentials(config, credentials.token, credentials.expiry)
@@ -82,25 +88,75 @@ class KubernetesHTTPAdapter(requests.adapters.HTTPAdapter):
             config = self.kube_config
 
         _retry_attempt = kwargs.pop("_retry_attempt", 0)
-        retry_func = None
+        retry_func = self._setup_request_auth(config, request, kwargs)
+        self._setup_request_certificates(config, request, kwargs)
 
-        # setup cluster API authentication
+        response = self._do_send(request, **kwargs)
 
+        _retry_status_codes = {HTTPStatus.UNAUTHORIZED}
+
+        if (
+            response.status_code in _retry_status_codes
+            and retry_func
+            and _retry_attempt < 2
+        ):
+            send_kwargs = {"_retry_attempt": _retry_attempt + 1, "kube_config": config}
+            send_kwargs.update(kwargs)
+            return retry_func(send_kwargs=send_kwargs)
+
+        return response
+
+    def _setup_request_auth(self, config, request, kwargs):
+        """
+        Set up authorization for the request.
+
+        Return an optional function to use as a retry manager if the initial request fails
+        with an unauthorized error.
+        """
         if "Authorization" in request.headers:
             # request already has some auth header (e.g. Bearer token)
             # don't modify/overwrite it
-            pass
-        elif "token" in config.user and config.user["token"]:
+            return None
+
+        if config.user.get("token"):
             request.headers["Authorization"] = "Bearer {}".format(config.user["token"])
-        elif "auth-provider" in config.user:
+            return None
+
+        if "exec" in config.user:
+            exec_conf = config.user["exec"]
+
+            api_version = exec_conf["apiVersion"]
+            if api_version == "client.authentication.k8s.io/v1alpha1":
+                cmd_env_vars = dict(os.environ)
+                for env_var in exec_conf.get("env") or []:
+                    cmd_env_vars[env_var["name"]] = env_var["value"]
+
+                output = subprocess.check_output(
+                    [exec_conf["command"]] + exec_conf["args"], env=cmd_env_vars
+                )
+
+                parsed_out = json.loads(output)
+                token = parsed_out["status"]["token"]
+            else:
+                raise NotImplementedError(
+                    f"auth exec api version {api_version} not implemented"
+                )
+
+            request.headers["Authorization"] = "Bearer {}".format(token)
+            return None
+
+        if config.user.get("username") and config.user.get("password"):
+            request.prepare_auth((config.user["username"], config.user["password"]))
+            return None
+
+        if "auth-provider" in config.user:
             auth_provider = config.user["auth-provider"]
             if auth_provider.get("name") == "gcp":
-                dependencies = [
-                    google_auth_installed,
-                    jsonpath_installed,
-                ]
+                dependencies = [google_auth_installed, jsonpath_installed]
                 if not all(dependencies):
-                    raise ImportError("missing dependencies for GCP support (try pip install pykube-ng[gcp]")
+                    raise ImportError(
+                        "missing dependencies for GCP support (try pip install pykube-ng[gcp]"
+                    )
                 auth_config = auth_provider.get("config", {})
                 if "cmd-path" in auth_config:
                     output = subprocess.check_output(
@@ -110,7 +166,7 @@ class KubernetesHTTPAdapter(requests.adapters.HTTPAdapter):
                     token = jsonpath_parse(auth_config["token-key"], parsed)
                     expiry = datetime.datetime.strptime(
                         jsonpath_parse(auth_config["expiry-key"], parsed),
-                        "%Y-%m-%dT%H:%M:%SZ"
+                        "%Y-%m-%dT%H:%M:%SZ",
                     )
                     retry_func = self._auth_gcp(request, token, expiry, None)
                 else:
@@ -120,40 +176,27 @@ class KubernetesHTTPAdapter(requests.adapters.HTTPAdapter):
                         auth_config.get("expiry"),
                         config,
                     )
+                return retry_func
             elif auth_provider.get("name") == "oidc":
                 auth_config = auth_provider.get("config", {})
                 # @@@ support token refresh
                 if "id-token" in auth_config:
-                    request.headers["Authorization"] = "Bearer {}".format(auth_config["id-token"])
-        elif config.user.get("username") and config.user.get("password"):
-            request.prepare_auth((config.user["username"], config.user["password"]))
+                    request.headers["Authorization"] = "Bearer {}".format(
+                        auth_config["id-token"]
+                    )
+        return None
 
+    def _setup_request_certificates(self, config, request, kwargs):
         if "client-certificate" in config.user:
             kwargs["cert"] = (
                 config.user["client-certificate"].filename(),
                 config.user["client-key"].filename(),
             )
-
         # setup certificate verification
-
         if "certificate-authority" in config.cluster:
             kwargs["verify"] = config.cluster["certificate-authority"].filename()
         elif "insecure-skip-tls-verify" in config.cluster:
             kwargs["verify"] = not config.cluster["insecure-skip-tls-verify"]
-
-        response = self._do_send(request, **kwargs)
-
-        _retry_status_codes = {HTTPStatus.UNAUTHORIZED}
-
-        if response.status_code in _retry_status_codes and retry_func and _retry_attempt < 2:
-            send_kwargs = {
-                "_retry_attempt": _retry_attempt + 1,
-                "kube_config": config,
-            }
-            send_kwargs.update(kwargs)
-            return retry_func(send_kwargs=send_kwargs)
-
-        return response
 
 
 class HTTPClient:
@@ -161,7 +204,16 @@ class HTTPClient:
     Client for interfacing with the Kubernetes API.
     """
 
-    def __init__(self, config: KubeConfig, timeout: float = DEFAULT_HTTP_TIMEOUT, dry_run: bool = False, verify=True):
+    http_adapter_cls = KubernetesHTTPAdapter
+
+    def __init__(
+        self,
+        config: KubeConfig,
+        timeout: float = DEFAULT_HTTP_TIMEOUT,
+        dry_run: bool = False,
+        verify: bool = True,
+        http_adapter: Optional[requests.adapters.HTTPAdapter] = None,
+    ):
         """
         Creates a new instance of the HTTPClient.
 
@@ -174,9 +226,11 @@ class HTTPClient:
         self.dry_run = dry_run
 
         session = requests.Session()
-        session.headers['User-Agent'] = f'pykube-ng/{__version__}'
-        session.mount("https://", KubernetesHTTPAdapter(self.config))
-        session.mount("http://", KubernetesHTTPAdapter(self.config))
+        session.headers["User-Agent"] = f"pykube-ng/{__version__}"
+        if not http_adapter:
+            http_adapter = self.http_adapter_cls(self.config)
+        session.mount("https://", http_adapter)
+        session.mount("http://", http_adapter)
         self.session = session
         self.session.verify = verify
 
@@ -200,7 +254,7 @@ class HTTPClient:
         return (data["major"], data["minor"])
 
     def resource_list(self, api_version):
-        cached_attr = f'_cached_resource_list_{api_version}'
+        cached_attr = f"_cached_resource_list_{api_version}"
         if not hasattr(self, cached_attr):
             r = self.get(version=api_version)
             r.raise_for_status()
@@ -223,7 +277,12 @@ class HTTPClient:
             if "base" not in kwargs:
                 raise TypeError("unknown API version; base kwarg must be specified.")
             base = kwargs.pop("base")
-        bits = [base, version]
+        if version.startswith("/"):
+            # for compatibility with pykube-ng 20.1.0 when calling api.get(version="/apis"):
+            # posixpath.join() was throwing away everything before the first "absolute" path (i.e. starting with a slash)
+            bits = [version]
+        else:
+            bits = [base, version]
         # Overwrite (default) namespace from context if it was set
         if "namespace" in kwargs:
             n = kwargs.pop("namespace")
@@ -233,23 +292,18 @@ class HTTPClient:
                 else:
                     namespace = self.config.namespace
                 if namespace:
-                    bits.extend([
-                        "namespaces",
-                        namespace,
-                    ])
+                    bits.extend(["namespaces", namespace])
         url = kwargs.get("url", "")
-        if url.startswith("/"):
-            url = url[1:]
         bits.append(url)
-        kwargs["url"] = self.url + posixpath.join(*bits)
-        if 'timeout' not in kwargs:
+        kwargs["url"] = self.url + join_url_path(*bits, join_empty=True)
+        if "timeout" not in kwargs:
             # apply default HTTP timeout
-            kwargs['timeout'] = self.timeout
+            kwargs["timeout"] = self.timeout
         if self.dry_run:
             # Add http query param for dryRun
-            params = kwargs.get('params', {})
-            params['dryRun'] = 'All'
-            kwargs['params'] = params
+            params = kwargs.get("params", {})
+            params["dryRun"] = "All"
+            kwargs["params"] = params
         return kwargs
 
     def raise_for_status(self, resp):
